@@ -17,6 +17,7 @@ from .updates import AutoUpdate
 from .ui.theme import checkpoint_icon
 from .settings import ServerMode, settings
 from .util import client_logger as log
+from . import eventloop
 
 
 class Root(QObject):
@@ -32,8 +33,10 @@ class Root(QObject):
     _connection: Connection
     _models: list[PerDocument]
     _recent: RecentlyUsedSync
+    _wildcards: list[str]
 
     model_created = pyqtSignal(Model)
+    wildcards_changed = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -47,6 +50,7 @@ class Root(QObject):
         self._null_model = Model(Document(), self._connection, self._workflows)
         self._recent = RecentlyUsedSync.from_settings()
         self._auto_update = AutoUpdate()
+        self._wildcards = []
         if settings.auto_update:
             self._auto_update.check()
         self._connection.message_received.connect(self._handle_message)
@@ -103,6 +107,30 @@ class Root(QObject):
         if model := self.model_for_active_document():
             return model
         return self._null_model
+
+    @property
+    def wildcards(self) -> list[str]:
+        return self._wildcards
+
+    def _set_wildcards(self, values: list[str]):
+        values = sorted(set(values))
+        if values != self._wildcards:
+            self._wildcards = values
+            self.wildcards_changed.emit()
+
+    async def update_wildcards(self, refresh: bool = False):
+        client = self._connection.client_if_connected
+        if not client:
+            return
+        try:
+            if refresh:
+                ok = await client.wildcards_refresh()
+                if not ok:
+                    return
+            values = await client.wildcards_list()
+            self._set_wildcards(values)
+        except Exception as e:
+            log.warning(f"Failed to update wildcards: {e}")
 
     async def autostart(self, signal_server_change: Callable):
         connection = self._connection
@@ -177,6 +205,9 @@ class Root(QObject):
 
             loras = [File.remote(lora, FileFormat.lora) for lora in client.models.loras]
             self._files.loras.update(loras, FileSource.remote)
+
+            if settings.dynamic_prompts and settings.dp_wildcard_auto_completion:
+                eventloop.run(self.update_wildcards())
 
 
 root = Root()

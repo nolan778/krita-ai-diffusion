@@ -170,26 +170,105 @@ class Model(QObject, ObservableProperties):
         self._generate(QueueMode.replace)
 
     def _generate(self, queue_mode: QueueMode):
-        """Enqueue image generation for the current setup."""
-        ok, msg = self._doc.check_color_mode()
-        if not ok and msg:
-            self.report_error(msg)
-            return
+        """Enqueue image generation for the current setup (async)."""
 
-        try:
-            input, job_params = self._prepare_workflow()
-        except Exception as e:
-            self.report_error(util.log_error(e))
-            return
-        self.clear_error()
-        jobs = self.enqueue_jobs(input, JobKind.diffusion, job_params, self.batch_count, queue_mode)
-        eventloop.run(_report_errors(self, jobs))
+        async def _run():
+            ok, msg = self._doc.check_color_mode()
+            if not ok and msg:
+                self.report_error(msg)
+                return
 
-    def _prepare_workflow(self, dryrun=False):
+            try:
+                ctx = self._build_prepare_context()
+            except Exception as e:
+                self.report_error(util.log_error(e))
+                return
+
+            # Evaluate dynamic prompts BEFORE workflow.prepare so LoRA tags from wildcards are preserved
+            original_prompt = ctx.conditioning.positive
+            is_dynamic_prompt = False
+            if settings.dynamic_prompts:
+                try:
+                    client = self._connection.client
+                    seed = ctx.seed
+
+                    # Positive prompt
+                    if ctx.conditioning.positive:
+                        evaluated_pos = await client.wildcards_process(
+                            ctx.conditioning.positive, seed=seed
+                        )
+                        if evaluated_pos:
+                            ctx.conditioning.positive = evaluated_pos
+                            is_dynamic_prompt = evaluated_pos != original_prompt
+                    # Regions
+                    for idx, r in enumerate(ctx.conditioning.regions):
+                        if r.positive:
+                            evaluated_reg = await client.wildcards_process(r.positive, seed=seed)
+                            if evaluated_reg:
+                                r.positive = evaluated_reg
+                            # keep JobRegion prompt in sync
+                            if idx < len(ctx.job_regions):
+                                ctx.job_regions[idx].prompt = r.positive
+                except Exception:
+                    pass
+
+            # Build workflow AFTER dynamic evaluation
+            prompt = ctx.conditioning.positive
+            try:
+                input = workflow.prepare(
+                    ctx.workflow_kind,
+                    ctx.canvas,
+                    ctx.conditioning,
+                    self.style,
+                    ctx.seed,
+                    self._connection.client.models,
+                    FileLibrary.instance(),
+                    self._performance_settings(self._connection.client),
+                    mask=ctx.mask,
+                    strength=self.strength,
+                    inpaint=ctx.inpaint,
+                )
+            except Exception as e:
+                self.report_error(util.log_error(e))
+                return
+
+            # Build job params and metadata
+            job_name = ctx.conditioning.positive
+            if len(ctx.job_regions) == 1 and ctx.job_regions[0].prompt:
+                job_name = ctx.job_regions[0].prompt
+            job_params = JobParams(ctx.bounds, job_name, regions=ctx.job_regions)
+            job_params.set_style(self.style, ensure(input.models).checkpoint)
+            job_params.metadata["prompt"] = prompt
+            job_params.metadata["negative_prompt"] = self.regions.negative
+            job_params.metadata["strength"] = self.strength
+
+            # Only compare original vs. result of wildcard processing (pre-prepare),
+            # not against the final prompt which may strip LoRA tags
+            if is_dynamic_prompt:
+                job_params.metadata["dynamic_prompt"] = original_prompt
+                job_params.metadata["is_dynamic_prompt"] = True
+
+            self.clear_error()
+            await self.enqueue_jobs(
+                input, JobKind.diffusion, job_params, self.batch_count, queue_mode
+            )
+
+        eventloop.run(_report_errors(self, _run()))
+
+    class _PrepareContext(NamedTuple):
+        workflow_kind: WorkflowKind
+        canvas: Image | Extent
+        conditioning: ConditioningInput
+        seed: int
+        mask: Mask | None
+        inpaint: InpaintParams | None
+        bounds: Bounds
+        job_regions: list[JobRegion]
+
+    def _build_prepare_context(self, dryrun=False) -> _PrepareContext:
         workflow_kind = WorkflowKind.generate
         if self.strength < 1.0 or self.arch.is_edit:
             workflow_kind = WorkflowKind.refine
-        client = self._connection.client
         image = None
         inpaint_mode = InpaintMode.fill
         inpaint = None
@@ -238,27 +317,40 @@ class Model(QObject, ObservableProperties):
                 )
             inpaint.grow, inpaint.feather = selection_mod.apply(selection_bounds)
 
-        prompt = conditioning.positive  # modified in workflow.prepare
-        input = workflow.prepare(
+        seed_value = self.seed if self.fixed_seed else workflow.generate_seed()
+        return Model._PrepareContext(
             workflow_kind,
             image or extent,
             conditioning,
-            self.style,
-            self.seed if self.fixed_seed else workflow.generate_seed(),
-            client.models,
-            FileLibrary.instance(),
-            self._performance_settings(client),
-            mask=mask,
-            strength=self.strength,
-            inpaint=inpaint,
+            seed_value,
+            mask,
+            inpaint,
+            bounds,
+            job_regions,
         )
-        job_params = JobParams(bounds, prompt, regions=job_regions)
+
+    def _prepare_workflow(self, dryrun=False):
+        ctx = self._build_prepare_context(dryrun)
+        input = workflow.prepare(
+            ctx.workflow_kind,
+            ctx.canvas,
+            ctx.conditioning,
+            self.style,
+            ctx.seed,
+            self._connection.client.models,
+            FileLibrary.instance(),
+            self._performance_settings(self._connection.client),
+            mask=ctx.mask,
+            strength=self.strength,
+            inpaint=ctx.inpaint,
+        )
+        job_params = JobParams(ctx.bounds, ctx.conditioning.positive, regions=ctx.job_regions)
         job_params.set_style(self.style, ensure(input.models).checkpoint)
-        job_params.metadata["prompt"] = prompt
+        job_params.metadata["prompt"] = ctx.conditioning.positive
         job_params.metadata["negative_prompt"] = self.regions.negative
         job_params.metadata["strength"] = self.strength
-        if len(job_regions) == 1:
-            job_params.metadata["prompt"] = job_params.name = job_regions[0].prompt
+        if len(ctx.job_regions) == 1:
+            job_params.metadata["prompt"] = job_params.name = ctx.job_regions[0].prompt
         return input, job_params
 
     async def enqueue_jobs(

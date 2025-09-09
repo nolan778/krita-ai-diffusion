@@ -451,6 +451,59 @@ class ComfyClient(Client):
             log.error(f"Could not translate text: {str(e)}")
             return text
 
+    async def wildcards_refresh(self) -> bool:
+        """Reload wildcard files on the Impact Pack server.
+
+        Returns True on success, False on failure.
+        """
+        try:
+            log.info("Wildcard cache refresh request sent to Impact Pack Server API")
+            await self._get("impact/wildcards/refresh")
+            log.info("Wildcard cache refreshed")
+            return True
+        except NetworkError as e:
+            log.error(f"Couldn't refresh wildcards: {str(e)}")
+            return False
+
+    async def wildcards_list(self) -> list[str]:
+        """Retrieve the list of available wildcard names from the server.
+
+        Returns an empty list if the request fails or the payload is unexpected.
+        """
+        try:
+            log.info("Wildcard list request sent to Impact Pack Server API")
+            result = await self._get("impact/wildcards/list")
+            if isinstance(result, dict):
+                data = result.get("data", [])
+                if isinstance(data, list):
+                    log.info(f"{len(data)} wildcards found")
+                    return [str(x) for x in data]
+            log.warning("No wildcards found")
+            return []
+        except NetworkError as e:
+            log.error(f"Couldn't list wildcards: {str(e)}")
+            return []
+
+    async def wildcards_process(self, text: str, seed: int | None = None) -> str:
+        """Process a text string using the Impact Pack wildcard system.
+
+        If 'seed' is provided it will be used by the server for deterministic expansion.
+        Returns the processed text on success, or the original text on failure.
+        """
+        try:
+            payload: dict[str, object] = {"text": text}
+            if seed is not None:
+                payload["seed"] = seed
+            result = await self._post("impact/wildcards", payload)
+            if isinstance(result, dict):
+                populated = result.get("text")
+                if isinstance(populated, str):
+                    return populated
+            return text
+        except NetworkError as e:
+            log.error(f"Couldn't process wildcards: {str(e)}")
+            return text
+
     async def _subscribe_workflows(self):
         try:
             await self._post("api/etn/workflow/subscribe", {"client_id": self._id})

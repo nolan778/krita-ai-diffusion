@@ -115,7 +115,7 @@ class HistoryWidget(QListWidget):
 
         if not JobParams.equal_ignore_seed(self._last_job_params, job.params):
             self._last_job_params = job.params
-            prompt = job.params.name if job.params.name != "" else "<no prompt>"
+            prompt = job.params.get_job_header()
             strength = job.params.metadata.get("strength", 1.0)
             strength = f"{strength * 100:.0f}% - " if strength != 1.0 else ""
 
@@ -174,7 +174,28 @@ class HistoryWidget(QListWidget):
             if tooltip_header
             else []
         )
+        is_dynamic = bool(params.metadata.get("is_dynamic_prompt", False))
+
+        if is_dynamic:
+            dyn = params.metadata.get("dynamic_prompt", "")
+            pop = params.metadata.get("prompt", "")
+            s1 = f"{_('Dynamic Prompt')}: {dyn}"
+            s2 = f"{_('Populated Prompt')}: {pop}"
+            if tooltip_header:
+                s1 = wrap_text(s1, 80, subsequent_indent=" ")
+                s2 = wrap_text(s2, 80, subsequent_indent=" ")
+            strings.append(s1)
+            strings.append(s2)
+
         for key, value in params.metadata.items():
+            if is_dynamic and key in (
+                "prompt",
+                "dynamic_prompt",
+                "is_dynamic_prompt",
+            ):
+                continue
+            if not is_dynamic and key == "is_dynamic_prompt":
+                continue
             if key == "style" and style:
                 value = style.name
             if isinstance(value, list) and len(value) == 0:
@@ -303,6 +324,7 @@ class HistoryWidget(QListWidget):
 
     def rebuild(self):
         self.clear()
+        self._last_job_params = None
         for job in filter(self.is_finished, self._model.jobs):
             self.add(job)
         self.scrollToBottom()
@@ -379,6 +401,8 @@ class HistoryWidget(QListWidget):
         if item is not None:
             job = self._model.jobs.find(self._item_data(item).job)
             menu = QMenu(self)
+            if job is not None and job.params.metadata.get("is_dynamic_prompt", False):
+                menu.addAction(_("Copy Dynamic Prompt"), self._copy_dynamic_prompt)
             menu.addAction(_("Copy Prompt"), self._copy_prompt)
             menu.addAction(_("Copy Strength"), self._copy_strength)
             style_action = ensure(menu.addAction(_("Copy Style"), self._copy_style))
@@ -406,18 +430,24 @@ class HistoryWidget(QListWidget):
         pos.setY(pos.y() + self._context_button.height())
         self._show_context_menu(pos)
 
-    def _copy_prompt(self):
+    def _copy_prompt(self, dynamic: bool = False):
         if job := self.selected_job:
+            prompt = job.params.prompt
+            if dynamic:
+                prompt = job.params.metadata.get("dynamic_prompt", job.params.prompt)
             active = self._model.regions.active_or_root
-            active.positive = job.params.prompt
+            active.positive = prompt
             if isinstance(active, RootRegion):
                 active.negative = job.params.metadata.get("negative_prompt", "")
 
             if clipboard := QGuiApplication.clipboard():
-                clipboard.setText(job.params.prompt)
+                clipboard.setText(prompt)
 
             if self._model.workspace is Workspace.custom and self._model.document.is_active:
                 self._model.custom.try_set_params(job.params.metadata)
+
+    def _copy_dynamic_prompt(self):
+        self._copy_prompt(dynamic=True)
 
     def _copy_strength(self):
         if job := self.selected_job:

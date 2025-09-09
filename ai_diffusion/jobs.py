@@ -76,7 +76,35 @@ class JobParams:
         if a is None or b is None:
             return a is b
         field_names = (f.name for f in fields(cls) if not f.name == "seed")
+        if settings.dynamic_prompts and settings.dp_group_jobs_by_dynamic_prompt:
+            a_is_dynamic = bool(a.metadata.get("is_dynamic_prompt", False))
+            b_is_dynamic = bool(b.metadata.get("is_dynamic_prompt", False))
+            if a_is_dynamic and b_is_dynamic:
+                # if both are dynamic prompts, compare all fields except seed, name and metadata["prompt"]
+                # instead, when comparing metadata, compare all metadata except prompt
+                field_names = (
+                    f.name
+                    for f in fields(cls)
+                    if not f.name == "seed" and not f.name == "name" and not f.name == "metadata"
+                )
+
+                if all(getattr(a, name) == getattr(b, name) for name in field_names):
+                    a_meta = dict(a.metadata)
+                    b_meta = dict(b.metadata)
+                    a_meta.pop("prompt", None)
+                    b_meta.pop("prompt", None)
+                    return a_meta == b_meta
+
         return all(getattr(a, name) == getattr(b, name) for name in field_names)
+
+    def get_job_header(self):
+        job_header = self.name if self.name != "" else "<no prompt>"
+        if settings.dp_group_jobs_by_dynamic_prompt and bool(
+            self.metadata.get("is_dynamic_prompt", False)
+        ):
+            job_header = self.metadata.get("dynamic_prompt", job_header)
+
+        return job_header
 
     def set_style(self, style: Style, checkpoint: str):
         self.metadata["style"] = style.filename

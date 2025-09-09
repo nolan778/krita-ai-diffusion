@@ -458,7 +458,39 @@ class InterfaceSettings(SettingsTab):
             SwitchSetting(S._show_negative_prompt, (_("Show"), _("Hide")), self),
         )
         self.add("show_steps", SwitchSetting(S._show_steps, parent=self))
+        self.add("dynamic_prompts", SwitchSetting(S._dynamic_prompts, parent=self))
 
+        self.add(
+            "dp_group_jobs_by_dynamic_prompt",
+            SwitchSetting(S._dp_group_jobs_by_dynamic_prompt, parent=self),
+        )
+
+        self.add(
+            "dp_wildcard_auto_completion",
+            SwitchSetting(S._dp_wildcard_auto_completion, parent=self),
+        )
+
+        self._dp_container = QWidget(self)
+        dp_layout = QVBoxLayout(self._dp_container)
+        dp_layout.setContentsMargins(40, 0, 0, 0)
+        dp_layout.setSpacing(4)
+
+        self._refresh_wildcards_btn = QPushButton(_("Refresh Wildcard Cache"), self._dp_container)
+        self._refresh_wildcards_btn.clicked.connect(self._refresh_wildcards)
+        dp_layout.addWidget(self._refresh_wildcards_btn)
+
+        dp_keys = [
+            "dp_group_jobs_by_dynamic_prompt",
+            "dp_wildcard_auto_completion",
+        ]
+        for key in dp_keys:
+            w = self._widgets[key]
+            dp_layout.addWidget(w)
+
+        self._layout.addWidget(self._dp_container)
+        self._widgets["dynamic_prompts"].value_changed.connect(self._update_dp_visibility)
+        self._widgets["dynamic_prompts"].value_changed.connect(self._update_wildcards)
+        self._widgets["dp_wildcard_auto_completion"].value_changed.connect(self._update_wildcards)
         self.add("tag_files", FileListSetting(S._tag_files, files=self._tag_files(), parent=self))
         self._layout.addWidget(self._widgets["tag_files"].list_widget)
         self._widgets["tag_files"].add_button(
@@ -500,8 +532,22 @@ class InterfaceSettings(SettingsTab):
 
         self._layout.addStretch()
 
+    def _refresh_wildcards(self):
+        if root.connection.state != ConnectionState.connected:
+            QMessageBox.warning(self, _("Not connected"), _("Please connect to a server first."))
+            return
+        # Disable button temporarily to avoid duplicate clicks
+        self._refresh_wildcards_btn.setEnabled(False)
+
+        async def _run_refresh():
+            await root.update_wildcards(refresh=True)
+            self._refresh_wildcards_btn.setEnabled(True)
+
+        eventloop.run(_run_refresh())
+
     def read(self):
         super().read()
+        self._update_dp_visibility()
         self._update_image_format_widgets()
 
     def _tag_files(self) -> list[str]:
@@ -531,6 +577,17 @@ class InterfaceSettings(SettingsTab):
         translation.enabled = client is not None
         translation.set_items(languages)
         self.read()
+
+    def _update_wildcards(self):
+        if (
+            self._widgets["dynamic_prompts"].value
+            and self._widgets["dp_wildcard_auto_completion"].value
+        ):
+            eventloop.run(root.update_wildcards())
+
+    def _update_dp_visibility(self):
+        enabled = self._widgets["dynamic_prompts"].value
+        self._dp_container.setVisible(enabled)
 
     def _update_image_format_widgets(self):
         fmt: ImageFileFormat = self._widgets["save_image_format"].value

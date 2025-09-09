@@ -138,6 +138,7 @@ class TagCompleterDelegate(QStyledItemDelegate):
 # Ensure there's only one of these globally. It gets pretty big if we have one per widget.
 _tag_model = TagListModel([])
 _tag_files = None
+_wildcard_model = QStringListModel([])
 
 
 class PromptAutoComplete:
@@ -159,6 +160,9 @@ class PromptAutoComplete:
 
         self._reload_tag_model()
         settings.changed.connect(self._reload_tag_model)
+
+        root.wildcards_changed.connect(self._reload_wildcard_model)
+        self._reload_wildcard_model()
 
     def _reload_tag_model(self):
         global _tag_model
@@ -205,6 +209,14 @@ class PromptAutoComplete:
         _tag_model.setTags(unique_tags)
         _tag_files = tag_files
 
+    def _reload_wildcard_model(self):
+        wildcards = (
+            root.wildcards
+            if settings.dynamic_prompts and settings.dp_wildcard_auto_completion
+            else []
+        )
+        _wildcard_model.setStringList(wildcards)
+
     def _current_text(self, separators=" >\n") -> str:
         text = self._widget.toPlainText()
         start = pos = cursor_position(text, self._widget.textCursor())
@@ -217,22 +229,50 @@ class PromptAutoComplete:
         name = prefix.removeprefix("<lora:")
         lora_mode = len(prefix) > len(name)
 
-        if lora_mode:
+        # Determine current token boundaries for wildcard detection. Include spaces, pipes, braces, and colons.
+        token = self._current_text(separators="()>,\n {}|:").lstrip()
+
+        # If inside a <lora:...> block but typing a wildcard token, prefer wildcard completion
+        if (
+            lora_mode
+            and settings.dynamic_prompts
+            and settings.dp_wildcard_auto_completion
+            and token.startswith("__")
+        ):
+            self._completer.setModel(_wildcard_model)
+            self._popup.setItemDelegate(self._lora_delegate)
+            self._completion_prefix = token
+            self._completion_suffix = ""
+            name = token.lstrip("_")  # better fuzzy filtering
+        elif lora_mode:
             self._completer.setModel(self._lora_model)
             self._completion_prefix = name
             self._completion_suffix = ">"
             self._popup.setItemDelegate(self._lora_delegate)
         else:
-            # fall through to tag search
-            self._completion_prefix = prefix = self._current_text(separators="()>,\n").lstrip()
-            name = prefix.replace("\\(", "(").replace("\\)", ")")
-            if not name.startswith("<") and len(name.rstrip()) > 2:
-                self._completer.setModel(_tag_model)
-                self._popup.setItemDelegate(TagCompleterDelegate())
+            # fall through to tag or wildcard search based on current token
+            token = token
+            if (
+                settings.dynamic_prompts
+                and settings.dp_wildcard_auto_completion
+                and token.startswith("__")
+            ):
+                # Wildcard mode stays active as you type after '__'
+                self._completer.setModel(_wildcard_model)
+                self._popup.setItemDelegate(self._lora_delegate)
+                self._completion_prefix = token
                 self._completion_suffix = ""
+                name = token.lstrip("_")  # better fuzzy filtering
             else:
-                self._popup.hide()
-                return
+                self._completion_prefix = token
+                name = token.replace("\\(", "(").replace("\\)", ")")
+                if not name.startswith("<") and len(name.rstrip()) > 2:
+                    self._completer.setModel(_tag_model)
+                    self._popup.setItemDelegate(TagCompleterDelegate())
+                    self._completion_suffix = ""
+                else:
+                    self._popup.hide()
+                    return
         self._completer.setCompletionPrefix(name)
         rect = self._widget.cursorRect()
         self._popup.setCurrentIndex(ensure(self._completer.completionModel()).index(0, 0))
@@ -245,7 +285,7 @@ class PromptAutoComplete:
         if self._current_text().startswith("<lora:"):
             if file := root.files.loras.find(f"{completion}.safetensors"):
                 triggers = " " + file.meta("lora_triggers", "")
-        else:  # tag completion
+        else:  # tag/wildcard completion
             # escape () in tags so they won't be interpreted as prompt weights
             completion = completion.replace("(", "\\(").replace(")", "\\)")
         text = self._widget.toPlainText()

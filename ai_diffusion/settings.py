@@ -304,6 +304,29 @@ class Settings(QObject):
         _("Show Steps"), False, _("Display the number of steps to be evaluated in the weights box.")
     )
 
+    dynamic_prompts: bool
+    _dynamic_prompts = Setting(
+        _("Dynamic Prompts"),
+        False,
+        _(
+            "Evaluate dynamic prompts (variables, variants and wildcards) at job queue time. [ Requires Impact Pack custom nodes ]"
+        ),
+    )
+
+    dp_group_jobs_by_dynamic_prompt: bool
+    _dp_group_jobs_by_dynamic_prompt = Setting(
+        _("Group jobs by dynamic prompt template"),
+        False,
+        _("Group jobs by dynamic prompt template."),
+    )
+
+    dp_wildcard_auto_completion: bool
+    _dp_wildcard_auto_completion = Setting(
+        _("Wildcard: Auto-Completion"),
+        False,
+        _("Enable text completion for wildcards found in the wildcard cache."),
+    )
+
     tag_files: list[str]
     _tag_files = Setting(
         _("Tag Auto-Completion"),
